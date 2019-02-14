@@ -4,3 +4,8 @@ matplotlib==3.0.2
 pandasql==0.7.3
 scikit-learn==0.20.2
 joblib==0.13.1
+boto3==1.9.91
+s3fs==0.2.0
+dask==1.1.1
+dask[dataframe]
+requests==2.21.0
