@@ -9,3 +9,4 @@ s3fs==0.2.0
 dask==1.1.1
 dask[dataframe]
 requests==2.21.0
+pylint==2.2.2
