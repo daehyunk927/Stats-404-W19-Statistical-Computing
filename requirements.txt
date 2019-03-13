@@ -10,3 +10,4 @@ dask==1.1.1
 dask[dataframe]
 requests==2.21.0
 pylint==2.2.2
+plotly==3.7.0
