@@ -1,122 +1,123 @@
 #!/usr/bin/env python
 # coding: utf-8
+import os
+from datetime import datetime
+
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-
-from collections import Counter
-import inspect
-from joblib import dump, load
-import random
-import os
+from joblib import dump
 import dask.dataframe as dd
-import requests
-from time import time
-from datetime import date, datetime
 
 
-from sklearn.model_selection import GridSearchCV, train_test_split
+from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.preprocessing import LabelEncoder
-from sklearn.metrics import accuracy_score, confusion_matrix, f1_score, mean_squared_error, roc_auc_score
-from sklearn import svm
-from sklearn.multiclass import OneVsRestClassifier
-
-import plotly.tools as tls
-import plotly.offline as py
-from plotly.offline import init_notebook_mode, iplot, plot
-import plotly.graph_objs as go
+from sklearn.metrics import confusion_matrix, f1_score
 
 np.random.seed(2000)
 notebook_dir = os.getcwd()
 
-# used dask to read csv to speed up
-t0 = time()
+# ------------------------------------
+# Part 1: Data Processing
+# ------------------------------------
+
+# Load the data file using dask
 df = dd.read_csv("../Kickstarter/ks-projects-201801.csv",
                  encoding='ISO-8859-1'
                  )
-t1 = time()
-print((t1 - t0), 'seconds')
-
-# use pandas functions
+# use pandas functions instead of dask
 df = df.compute()
-
-df.head(10)
-
-df.info()
-
-df.isna().sum()
-
-df[df['name'].isna()].head()
-
-# In[13]:
-
-
-df[df['usd pledged'].isna()].head()
-
-# In[14]:
-
-
 
 # Only consider failed or successful projects
 # Exclude suspended, cancelled, and other misc states
-df = df[(df['state'] == "failed") | (df['state'] == "successful")]
 
 
-# changed launched data from datetime to date in the csv file
-# also utilized apply function as well as
-# datetime.strptime.date() which is faster than pd.to_datetime to reduce the time by 4 times
-t0 = time()
-df['project_length'] = df.apply(lambda row: (datetime.strptime((row['deadline']),
-                                                               "%m/%d/%Y").date() - datetime.strptime((row['launched']),
-                                                                                                      "%m/%d/%Y").date()).days + 1,
-                                axis=1)
-t1 = time()
-print((t1 - t0), 'seconds')
+def drop_unused_state(data):
+    data = data[(data['state'] == "failed") | (data['state'] == "successful")]
+    return data
 
-df[['deadline', 'launched', 'project_length']].head(5)
+
+df = drop_unused_state(df)
+
+# Find the length of each project by calculating the number of days
+# between launched date and deadline date
+
+
+def calculate_project_length(data):
+    data['project_length'] = data.apply(lambda row:
+                                    (datetime.strptime((row['deadline']),
+                                                       "%m/%d/%Y").date()
+                                     - datetime.strptime((row['launched']),
+                                                         "%m/%d/%Y").date()).days + 1,
+                                    axis=1)
+    return data
+
+
+df = calculate_project_length(df)
+
 # use better index for speeding
 df.set_index('ID', inplace=True)
-# drop unneccesary columns
-to_drop = ['name', 'category', 'deadline', 'launched', 'goal', 'pledged', 'usd pledged']
-df.drop(to_drop, inplace=True, axis=1)
+# drop unnecessary columns
+to_drop = ['name', 'category', 'deadline', 'launched',
+           'goal', 'pledged', 'usd pledged']
+
+
+def drop_unnecesaary_columns(to_drop, data):
+    data.drop(to_drop, inplace=True, axis=1)
+    return data
+
+
+df = drop_unnecesaary_columns(to_drop, df)
 
 # Select proper features for modeling
 # Exclude id, name, dates, other features that are not needed in modeling
-# We drop usd_pledged_real because the model would be perfectly predicting outcomes if it knows both pledged and goal values
-df_features = df[['main_category', 'state', 'country', 'usd_goal_real', 'project_length']]
-# Modify our dependent variable to 0 or 1
-mapping = {'failed': 0, 'successful': 1}
-df_features = df_features.replace({'state': mapping})
+# We drop usd_pledged_real because the model would be perfectly
+# predicting outcomes if it knows both pledged and goal values
+df_features = df[['main_category', 'state', 'country',
+                  'usd_goal_real', 'project_length']]
 
-df_features['state'] = pd.to_numeric(df_features['state'], errors='coerce')
-# Categorial columns to numerical using dummy variables
-df_features = pd.get_dummies(df_features)
+
+# Create Dummy variables for all the categorical variables
+Mapping = {'failed': 0, 'successful': 1}
+
+
+def change_categorical_to_numerical(mapping, data):
+    data = data.replace({'state': mapping})
+    data['state'] = pd.to_numeric(data['state'], errors='coerce')
+    data = pd.get_dummies(data)
+
+    return data
+
+
+df_features = change_categorical_to_numerical(Mapping, df_features)
 
 # Split the data to train and test
 df_train, df_valid = train_test_split(df_features,
                                       test_size=0.25,
                                       random_state=2018)
-df_train['state'].value_counts()
-df_valid['state'].value_counts()
 
+# Set up training and testing variable sets
 y = df_train['state']
 X = df_train.drop(columns=['state'])
 y_test = df_valid['state']
 X_test = df_valid.drop(columns=['state'])
 
-### --- Step 1: Specify different number of trees in forest, to determine
-###             how many to use based on leveling-off of OOB error:
-n_trees = [50, 100, 250, 500, 1000, 1500]
 
-### --- Step 2: Create dictionary to save-off each estimated RF model:
+# -------------------------------------------
+# Part 2: Model Estimation
+# -------------------------------------------
+
+# --- Step 1: Specify different number of trees in forest, to determine
+#             how many to use based on leveling-off of OOB error:
+#n_trees = [50, 100, 250, 500, 1000, 1500]
+n_trees = [50, 100]
+
+# --- Step 2: Create dictionary to save-off each estimated RF model:
 rf_dict = dict.fromkeys(n_trees)
-
-t0 = time()
 
 for num in n_trees:
     print(num)
-    ### --- Step 3: Specify RF model to estimate:
+    # --- Step 3: Specify RF model to estimate:
     rf = RandomForestClassifier(n_estimators=num,
                                 min_samples_leaf=30,
                                 oob_score=True,
@@ -124,14 +125,11 @@ for num in n_trees:
                                 class_weight='balanced',
                                 verbose=1,
                                 n_jobs=4)
-    ### --- Step 4: Estimate RF model and save estimated model:
+    # --- Step 4: Estimate RF model and save estimated model:
     rf.fit(X, y)
     rf_dict[num] = rf
 
-t1 = time()
-print((t1 - t0), 'seconds')
-
-### --- Save-off model:
+# --- Save-off model:
 # Specify location and name of object to contain estimated model:
 model_object_path = os.path.join(notebook_dir, 'rf.joblib')
 # Save estimated model to specified location:
@@ -140,11 +138,11 @@ dump(rf_dict, model_object_path)
 # Compute OOB error
 oob_error_list = [None] * len(n_trees)
 
-# Find OOB error for each forest size: 1000 is the best number
+# Find OOB error for each forest size: 1500 is the best number
 for i in range(len(n_trees)):
     oob_error_list[i] = 1 - rf_dict[n_trees[i]].oob_score_
 else:
-    # Visulaize result:
+    # Visualize result:
     fig = plt.figure()
     plt.plot(n_trees, oob_error_list, 'bo',
              n_trees, oob_error_list, 'k')
@@ -152,80 +150,73 @@ else:
     plt.xlabel('number of trees')
     plt.ylabel('OOB error')
 
-### Specify different number of leafs, to determine
-### how many to use based on leveling-off of OOB error:
-n_leaves = [5, 10, 30, 50, 100, 200]
-rf_dict2 = dict.fromkeys(n_leaves)
-t0 = time()
-
-for num in n_leaves:
-    print(num)
-    ### --- Step 3: Specify RF model to estimate:
-    rf = RandomForestClassifier(n_estimators=1500,
-                                min_samples_leaf=num,
-                                oob_score=True,
-                                random_state=2019,
-                                class_weight='balanced',
-                                verbose=1,
-                                n_jobs=4)
-    ### --- Step 4: Estimate RF model and save estimated model:
-    rf.fit(X, y)
-    rf_dict2[num] = rf
-
-t1 = time()
-print((t1 - t0), 'seconds')
-
-# Compute OOB error
-oob_error_list = [None] * len(n_leaves)
-
-# Find OOB error for each forest size: 1000 is the best number
-for i in range(len(n_leaves)):
-    oob_error_list[i] = 1 - rf_dict2[n_leaves[i]].oob_score_
-else:
-    # Visulaize result:
-    fig = plt.figure()
-    plt.plot(n_leaves, oob_error_list, 'bo',
-             n_leaves, oob_error_list, 'k')
-    fig.suptitle('Error vs Number of leaves')
-    plt.xlabel('number of leaves')
-    plt.ylabel('OOB error')
 
 # Feature importance plot
-top_num = 20
-forest = rf_dict[1500]
-importances = forest.feature_importances_
-# Sort in decreasing order:
-indices = np.argsort(importances)[::-1]
-len(importances)
-np.array(list(X))[indices[0:top_num]]
-# Plot the feature importances of the forest
-ax = plt.gca()
-plt.title(f"Top {top_num} feature importances")
-plt.bar(range(top_num), importances[indices[0:top_num]])
-plt.xticks(range(top_num))
-ax.set_xticklabels(np.array(list(X))[indices[0:top_num]], rotation=90)
-ax.set_xlabel("Features")
-ax.set_ylabel("Feature Importance")
-plt.show()
+top_num = 10
+forest = rf_dict[100]
 
-# Model Validation
+def plot_feature_imp(num, forest):
+    importances = forest.feature_importances_
+    # Sort in decreasing order:
+    indices = np.argsort(importances)[::-1]
+    # Plot the feature importance of the forest
+    ax = plt.gca()
+    plt.title(f"Top {num} feature importances")
+    plt.bar(range(num), importances[indices[0:num]])
+    plt.xticks(range(num))
+    ax.set_xticklabels(np.array(list(X))[indices[0:num]], rotation=90)
+    ax.set_xlabel("Features")
+    ax.set_ylabel("Feature Importance")
+    plt.show()
+
+
+plot_feature_imp(top_num, forest)
+# --------------------------------------------------
+# Part3: Model Validation
+# --------------------------------------------------
 y_pred_test = forest.predict(X_test)
 
+# Create a confusion matrix to see how accurate model predicts
 conf_mat = confusion_matrix(y_true=y_test,
                             y_pred=y_pred_test)
 
 class_names = ['failed', 'successful']
 conf_df = pd.DataFrame(conf_mat, class_names, class_names)
-conf_df_pct = conf_df / conf_df.sum(axis=0)
-round(conf_df_pct * 100, 1)
-# Fairly Successful results
+# Percentage format for confusion matrix
+conf_df_pct = conf_df/conf_df.sum(axis=0)
+round(conf_df_pct*100, 1)
+
+# Calculate f1 score of the model which indicates accuracy
+
+
+def calculate_f1_score(true, pred, average):
+    return f1_score(y_true=true,
+                    y_pred=pred,
+                    average=average)
+
 
 # Class-level performance:
-f1_score(y_true=y_test,
-         y_pred=y_pred_test,
-         average='macro')
-# Overall performance across all classes:
-f1_score(y_true=y_test,
-         y_pred=y_pred_test,
-         average='micro')
+f1_score_class = calculate_f1_score(y_test, y_pred_test, 'macro')
+f1_score_overall = calculate_f1_score(y_test, y_pred_test, 'micro')
 
+
+# --------------------------------------------------
+# Part4: Scoring with user inputs
+# --------------------------------------------------
+
+# Replace the input variables with desired inputs for your project
+input_row = {'main_category': 'Comics', 'country': 'US',
+         'usd_goal_real': 1000, 'project_length': 55}
+
+scoring_input = df_features.iloc[[0]]
+scoring_input.loc[:] = 0
+to_drop = ['state']
+scoring_input.drop(to_drop, inplace=True, axis=1)
+scoring_input['usd_goal_real'] = input_row['usd_goal_real']
+scoring_input['project_length'] = input_row['project_length']
+scoring_input['main_category_' + input_row['main_category']] = 1
+scoring_input['country_' + input_row['country']] = 1
+
+scoring_output = forest.predict(scoring_input)
+# 1 for successful, 0 for failed
+print("is_project_successful: ", scoring_output[0])
